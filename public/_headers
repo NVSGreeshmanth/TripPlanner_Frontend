@@ -1,0 +1,12 @@
+# Netlify security headers for DRAG-AND-DROP deploys.
+# netlify.toml is only read when Netlify builds from Git — a manual dist/ upload
+# ignores it. This file lives in public/ → Vite copies it to dist/_headers, so it
+# ships inside the folder you drop and Netlify applies it. Keep in sync with
+# netlify.toml. CSP keeps 'unsafe-inline' for scripts because the app uses inline
+# on*="" handlers; it still blocks external script loads, eval, and object embeds.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://nsw-planner.onrender.com https://api.open-meteo.com; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: geolocation=(self), camera=(), microphone=(), payment=()
