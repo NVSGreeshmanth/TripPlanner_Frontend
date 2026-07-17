@@ -7,16 +7,18 @@
 
 export const APP_VERSION = 'v1';
 
-// ── Backend — auto-detects local proxy (python proxy.py) vs deployed Render ──
+// ── Backend — auto-detects local proxy (python proxy.py) vs deployed VM ──
 // Same-origin ONLY when the page is served BY the python proxy (port 3001, hosts
 // both static app + API). Vite dev/preview pick any free port and have NO API, so
-// they must use Render (else /stops returns HTML → JSON.parse fails). Netlify
-// (non-localhost) → Render.
+// they must use the deployed proxy (else /stops returns HTML → JSON.parse fails).
+// PRIMARY is the OCI A1 (tripplannerau.duckdns.org) — no cold starts, Sydney-local.
+// FALLBACK: revert this one line to 'https://nsw-planner.onrender.com' (Render is
+// still deployed and CSP/sw already allow it).
 const _isLocalhost  = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
 const _onLocalProxy = _isLocalhost && location.port === '3001';
 export const PROXY = _onLocalProxy
   ? `${location.protocol}//${location.host}`
-  : 'https://nsw-planner.onrender.com';
+  : 'https://tripplannerau.duckdns.org';
 
 // ── Shared-secret header for the proxy's optional APP_SECRET gate ─────────────
 // If you set APP_SECRET on Render, set the SAME value here so every proxy call

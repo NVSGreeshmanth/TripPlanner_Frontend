@@ -136,13 +136,13 @@ export function renderAlerts() {
       const short = String(r).replace(/^[A-Z]+_/i, '').replace(/_\d+[a-z]?$/i, '');
       return `<span class="aline">${esc(short)}</span>`;
     }).join('');
-    const modeBadges = (al.modes || []).slice(0, 3).map(m =>
-      `<span class="alert-mode-badge">${esc(m)}</span>`).join('');
-
+    // (No mode badge: TfNSW never sets route_type on an alert entity, so al.modes
+    // is always empty — the proxy fix that stopped it lying "Light Rail" left it
+    // correctly blank. Rendering it drew nothing. The route badges carry the who.)
     const chips = [
       eff   ? `<span class="aeff ${_effClass(eff)}">${esc(eff)}</span>` : '',
       cause ? `<span class="acause">${esc(cause)}</span>` : '',
-      routeBadges, modeBadges,
+      routeBadges,
     ].filter(Boolean).join('');
 
     return `<div class="alert-item ${sevCls}${match ? ' alert-item-match' : ''}">

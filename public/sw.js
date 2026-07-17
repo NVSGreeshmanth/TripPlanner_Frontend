@@ -1,8 +1,8 @@
 // NSW Journey Planner — Service Worker v2
 // Hosted on: https://nswtripplanner.netlify.app/
-// API proxy: https://nsw-planner.onrender.com
+// API proxy: https://tripplannerau.duckdns.org (OCI A1); Render is the fallback
 
-const CACHE = 'nsw-journey-v147';
+const CACHE = 'nsw-journey-v149';
 
 // App shell — everything needed to show the UI instantly
 const SHELL = [
@@ -45,7 +45,7 @@ self.addEventListener('fetch', e => {
   const url = e.request.url;
 
   // Never intercept non-GET or cross-origin API calls
-  const isApi    = url.includes('onrender.com') || url.includes('transport.nsw.gov.au');
+  const isApi    = url.includes('tripplannerau.duckdns.org') || url.includes('onrender.com') || url.includes('transport.nsw.gov.au');
   const isFont   = url.includes('fonts.googleapis') || url.includes('fonts.gstatic');
   const isTile   = url.includes('basemaps.cartocdn.com');
   const isNonGet = e.request.method !== 'GET';
