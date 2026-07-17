@@ -1,0 +1,22 @@
+{
+  "name": "nsw-journey-planner",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173",
+    "lint": "eslint app.js src/",
+    "pretest": "eslint app.js src/ && vite build",
+    "test": "node tests/test_app_logic.cjs"
+  },
+  "devDependencies": {
+    "eslint": "^9.39.4",
+    "globals": "^17.7.0",
+    "vite": "^8.1.4"
+  },
+  "dependencies": {
+    "leaflet": "^1.9.4",
+    "motion": "^12.42.2"
+  }
+}
