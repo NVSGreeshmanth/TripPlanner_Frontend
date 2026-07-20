@@ -1232,6 +1232,17 @@ function startUpdatedCounter() {
 
 // ── Journey Search ────────────────────────────────────────────────────────────
 let journeyTimer = null;
+// The app header (sticky top:0) and the results refresh-bar (sticky under it) have
+// variable heights (viewport, theme, font). Measure them into CSS vars so the
+// refresh-bar sticks in the right place and the anchored "now" card clears both.
+function _syncStickyVars() {
+  const h = document.querySelector('header')?.offsetHeight;
+  const rb = byId('journey-results')?.querySelector('.refresh-bar')?.offsetHeight;
+  const r = document.documentElement;
+  if (h)  r.style.setProperty('--hdr-h', h + 'px');
+  if (rb) r.style.setProperty('--rbar-h', rb + 'px');
+}
+addEventListener('resize', () => requestAnimationFrame(_syncStickyVars));
 // Every service since ~5am, auto-loaded once per search and prepended above the
 // upcoming list. Held separately so the 30s refresh (which re-fetches only the
 // upcoming set) can merge them back rather than wiping them.
@@ -1710,6 +1721,7 @@ function renderJourneys(data, _pastData, doScroll = false, showAll = false) {
   // (Tracked snapshots were refreshed + persisted above as the feed was processed.)
   startUpdatedCounter();
   updateFab();
+  _syncStickyVars();   // header + refresh-bar heights drive the sticky offset
 
   // Warm the live vehicle feed for the modes on screen so seat-availability and
   // LIVE badges can populate on the cards (otherwise the feed only loads when the
