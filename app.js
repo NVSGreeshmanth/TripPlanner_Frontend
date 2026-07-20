@@ -1276,6 +1276,16 @@ function _juid(j) {
   return stableUid(dP, aP);
 }
 const _jrnDep = j => estDep((j.legs || []).find(l => !isWalkLeg(l)) || j.legs?.[0]);
+// On a refresh (not a fresh render), only cards near "now" need re-building: their
+// countdown/live delay can change. A card departing >90 min out or >30 min ago is
+// visually static this tick — skip it (huge saving on a full-day/week list). Always
+// rebuild if we can't read a time.
+function _cardNeedsPatch(j, nowMs) {
+  const d = _jrnDep(j);
+  if (!d) return true;
+  const dt = new Date(d).getTime() - nowMs;
+  return dt < 90 * 60000 && dt > -30 * 60000;
+}
 // Clean up interval on page unload to prevent stale polling after navigation
 window.addEventListener('beforeunload', () => clearInterval(journeyTimer));
 
@@ -1884,7 +1894,13 @@ function renderJourneys(data, _pastData, doScroll = false, showAll = false) {
     container.innerHTML = html;
   } else {
     // Same journeys → swap only the cards that actually changed (delay/live/etc.).
+    // A full day/week is 200-1400 cards; rebuilding EVERY card's HTML on each 30 s
+    // tick just to diff it is what made refresh feel slow. Only cards near "now"
+    // can visibly change (countdown ticking, live delay) — skip the far ones; they
+    // get rebuilt as "now" slides toward them.
+    const nowMs = now2.getTime();
     visibleJrns.forEach((j, idx) => {
+      if (!_cardNeedsPatch(j, nowMs)) return;
       const c = _buildOneCard(j, idx, false);
       if (jr.cards.get(c.uid) === c.html) return;                 // unchanged → leave DOM
       const el = container.querySelector(`.jcard[data-juid="${c.uid}"]`);
