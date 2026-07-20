@@ -13,6 +13,19 @@
 <meta name="theme-color" content="#0E1318" media="(prefers-color-scheme: dark)">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <title>NSW Journey Planner</title>
+<!-- Set theme/accent/font from storage BEFORE first paint so a dark-mode user
+     doesn't see a light flash (FOUC) while the JS module loads. Mirrors the keys
+     in prefs.js/app.js; the module re-applies the same values idempotently. -->
+<script>
+  (function () {
+    try {
+      var r = document.documentElement, ls = localStorage;
+      r.setAttribute('data-theme', ls.getItem('nsw_theme') === 'dark' ? 'dark' : 'light');
+      var a = ls.getItem('nsw_accent'); if (a && a !== 'default') r.setAttribute('data-accent', a);
+      if (ls.getItem('nsw_font') === 'elegant') r.setAttribute('data-font', 'elegant');
+    } catch (e) {}
+  })();
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
