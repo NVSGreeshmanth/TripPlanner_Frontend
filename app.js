@@ -1438,9 +1438,73 @@ export async function fetchJourneys(doScroll = false) {
   }
   jr.sig = ''; jr.struct = ''; jr.cards.clear();   // force full rebuild
   renderJourneys(currentJourneyData, null, doScroll);
-  // Live "now" search: once, in the background, pull in every earlier service
-  // since this morning and prepend them (user lands on "now", scrolls up for more).
-  if (doScroll && !departAt && !earlierJourneys.length) loadEarlierFromMorning(fresh);
+  // Live "now" search: once, in the background, load the FULL day's timetable and
+  // fold it in (user lands on "now", scrolls up for earlier / down for the rest).
+  if (doScroll && !departAt && !earlierJourneys.length) loadFullSchedule(fresh);
+}
+
+// TfNSW product class → GTFS schedule mode (rail only — bus stops aren't named
+// "Platform N" so the /schedule lookup can't match them; those fall back to the
+// planner windows).
+const _SCHED_MODE = { 1: 'trains', 2: 'metro', 4: 'lightrail', 9: 'ferries' };
+
+// Full-day timetable from the GTFS /schedule endpoint. Synthesises a lean card per
+// scheduled service, but keeps the rich /trip cards (live delay, platforms, line)
+// wherever their departure minute matches — so "now" stays live and the rest of the
+// day fills in as a timetable. Non-rail / unsupported → planner-window fallback.
+async function loadFullSchedule(fresh) {
+  if (!state.from.id || !state.to.id || departAt) return;
+  const tl  = fresh.map(j => (j.legs || []).find(l => !isWalkLeg(l))).find(Boolean);
+  const cls = tl?.transportation?.product?.class;
+  const mode = _SCHED_MODE[cls];
+  if (!mode) return loadEarlierFromMorning(fresh);        // non-rail → planner windows
+
+  const sp = sydParts(new Date());
+  const z2 = n => String(n).padStart(2, '0');
+  const date  = `${sp.year}${z2(sp.month)}${z2(sp.day)}`;
+  const fromN = (state.from.name || '').split(',')[0].trim();
+  const toN   = (state.to.name   || '').split(',')[0].trim();
+  let res = null;
+  try {
+    res = await timedFetch(PROXY + '/schedule?' + new URLSearchParams({ from: fromN, to: toN, date, mode }))
+      .then(r => (r.ok ? r.json() : null));
+  } catch { res = null; }
+  if (!res || !res.supported || !(res.services || []).length) return loadEarlierFromMorning(fresh);
+  if (!currentJourneyData || !state.from.id) return;      // a newer search started
+
+  // seconds-of-Sydney-day → absolute instant, offset-free: both are Sydney wall
+  // clock, so the delta from "now" is the same in absolute time.
+  const nowSec = sp.hour * 3600 + sp.minute * 60;
+  const toISO  = sec => new Date(Date.now() + (sec - nowSec) * 1000).toISOString();
+  const freshMin = new Set();
+  for (const j of fresh) { const d = _jrnDep(j); if (d) freshMin.add(Math.floor(new Date(d).getTime() / 60000)); }
+
+  const synth = [];
+  for (const s of res.services) {
+    const depISO = toISO(s.dep);
+    if (freshMin.has(Math.floor(new Date(depISO).getTime() / 60000))) continue;  // rich card wins
+    synth.push({
+      legs: [{
+        origin:      { name: state.from.name, departureTimePlanned: depISO },
+        destination: { name: state.to.name,   arrivalTimePlanned:   toISO(s.arr) },
+        transportation: { product: { class: cls }, disassembledName: '' },
+      }],
+      _sched: true, _tripId: s.tripId,
+    });
+  }
+  if (!synth.length) return;
+  earlierJourneys = synth;                                // 30s refresh keeps them
+  const all = [...synth, ...fresh].sort((a, b) => new Date(_jrnDep(a)) - new Date(_jrnDep(b)));
+  currentJourneyData = { ...currentJourneyData, journeys: all };
+  jr.showPast = true; jr.sig = ''; jr.struct = '';
+  renderJourneys(currentJourneyData, null, false);
+  // Anchor to the earliest UPCOMING rich service so the list doesn't jump.
+  let anchorUid = null, anchorT = Infinity;
+  for (const j of fresh) { const t = new Date(_jrnDep(j)).getTime(); if (t < anchorT) { anchorT = t; anchorUid = _juid(j); } }
+  if (anchorUid) requestAnimationFrame(() => {
+    const card = document.querySelector(`.jcard[data-juid="${anchorUid}"]`);
+    if (card) card.scrollIntoView({ block: 'start', behavior: 'auto' });
+  });
 }
 
 // Auto-load all services from ~5am up to the first upcoming departure and prepend
@@ -1927,9 +1991,13 @@ function buildJCard(uid, dep, arr, firstTL, lastTL, origPlat, destPlat, legs, ba
   // Status reads as words, not a pill: "On time" / "3 min late" (TripView).
   // ontime_badge ships as "✓ On time" — the tick would sit next to the status dot
   // and say the same thing twice, so strip it and let the dot carry the mark.
+  // "On time" only when realtime actually confirms it — otherwise a scheduled-only
+  // service (e.g. a /schedule timetable card) reads "On time · No live data", which
+  // contradicts itself. Late still shows regardless (it's derived from times).
+  const _hasRt = _transitLegs.some(legIsRealtime);
   const _statusTxt = worstDelay > 0
     ? `${worstDelay} ${t('min')} ${t('late_word') || 'late'}`
-    : (depPlanned || arrPlanned) ? String(t('ontime_badge') || 'On time').replace(/^✓\s*/, '') : '';
+    : (_hasRt && (depPlanned || arrPlanned)) ? String(t('ontime_badge') || 'On time').replace(/^✓\s*/, '') : '';
   const statusHtml = _statusTxt
     ? `<span class="jstatus ${worstDelay > 0 ? 'is-late' : 'is-ok'}"><span class="jstatus-dot"></span>${_statusTxt}</span>`
     : '';
