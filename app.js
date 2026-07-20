@@ -290,6 +290,13 @@ function platChangeBadges(uid, origPlat, destPlat) {
 // ── FAB helper ────────────────────────────────────────────────────────────────
 function openJourneyFromFab() {
   haptic([8]);
+  // Already on the journey page → jump to the search inputs at the top so the user
+  // doesn't have to scroll the whole day's timetable back up to search again.
+  if (byId('page-journey')?.style.display === 'block') {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    setTimeout(() => byId('from-input')?.focus({ preventScroll: true }), 300);
+    return;
+  }
   homeState.view = 'journey';
   switchTab('journey');
 }
@@ -300,6 +307,7 @@ function updateFab() {
   const vis = id => byId(id)?.style.display === 'block';
   // "New Journey" FAB only makes sense away from the Journey tab itself.
   fab.classList.toggle('show',
+    vis('page-journey') ||   // on results: FAB scrolls back up to the search inputs
     vis('page-depart') ||
     vis('page-favs'));
 }
@@ -2019,7 +2027,10 @@ function buildJCard(uid, dep, arr, firstTL, lastTL, origPlat, destPlat, legs, ba
   const rtBadge = !_transitLegs.length ? ''
     : _journeyDone
       ? `<span class="rt-badge rt-done" title="${t('rt_done_tip') || 'This service has completed'}">✓ ${t('rt_done') || 'Completed'}</span>`
-      : _transitLegs.some(legIsRealtime)
+      // `seat` means a live vehicle-position match (occupancy) exists — that IS
+      // live data, so don't contradict it with "No live data" just because there's
+      // no TripUpdates delay yet.
+      : (_transitLegs.some(legIsRealtime) || seat)
         ? ''
         : `<span class="rt-badge rt-off" title="${t('rt_off_tip') || 'No real-time data — scheduled times only'}">○ ${t('rt_none') || 'No live data'}</span>`;
   // The countdown block now states Departed/Done itself, so the pill is a second
@@ -2037,7 +2048,13 @@ function buildJCard(uid, dep, arr, firstTL, lastTL, origPlat, destPlat, legs, ba
   const _cdCol = getLineColors(_cdMot, _cdNm);
   let cdMain = '', cdSub = '';
   if (_journeyDone)        { cdMain = t('rt_done') || 'Done'; }
-  else if (hasDeparted)    { cdMain = t('departed') || 'Departed'; }
+  else if (hasDeparted) {
+    // How long ago it left, not just "Departed" — "2 min ago" tells you if you
+    // just missed it or it's long gone.
+    const agoMin = Math.round((nowCheck - new Date(transitDep)) / 60000);
+    if (agoMin <= 0) { cdMain = t('cd_now') || 'Now'; }
+    else { cdMain = String(agoMin); cdSub = `${agoMin === 1 ? (t('cd_min') || 'min') : (t('cd_mins') || 'mins')} ${t('cd_ago') || 'ago'}`; }
+  }
   else if (transitDep) {
     // A service on a LATER Sydney day shows the weekday ("Tue"), not a huge hour
     // count ("17h 53 min") — the day divider + clock time carry the rest.
