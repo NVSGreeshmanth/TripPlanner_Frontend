@@ -338,6 +338,10 @@ function toggleLang() {
 function applyLang() {
   // HTML i18n.lang attribute for accessibility
   byId('html-root').lang = i18n.lang === 'ko' ? 'ko' : 'en';
+  // Korean text wraps differently, which can change the header's height — make
+  // sure the next renderJourneys() re-measures the sticky offset instead of
+  // trusting a size it read for the other language.
+  _stickyDirty = true;
   // Header
   byId('hdr-title').textContent = t('hdr_title');
   byId('hdr-sub').textContent   = t('hdr_sub');
@@ -1243,6 +1247,14 @@ let journeyTimer = null;
 // The app header (sticky top:0) and the results refresh-bar (sticky under it) have
 // variable heights (viewport, theme, font). Measure them into CSS vars so the
 // refresh-bar sticks in the right place and the anchored "now" card clears both.
+// offsetHeight forces the browser to flush layout for the WHOLE page before
+// returning a number — on a 1000+ card timetable that forced reflow was the
+// actual cost of a routine 30s refresh (profiled: ~4x more than building the
+// cards). `_stickyDirty` marks when the header/refresh-bar could plausibly have
+// changed SIZE (first render, full card-list rebuild, language switch — Korean
+// text wraps differently, resize has its own listener) so renderJourneys only
+// pays for the measurement then, not on every unrelated refresh tick.
+let _stickyDirty = true;
 function _syncStickyVars() {
   const h = document.querySelector('header')?.offsetHeight;
   const rb = byId('journey-results')?.querySelector('.refresh-bar')?.offsetHeight;
@@ -1468,7 +1480,14 @@ export async function fetchJourneys(doScroll = false) {
     currentJourneyData = data;
     jr.showPast = false;
   }
-  jr.sig = ''; jr.struct = ''; jr.cards.clear();   // force full rebuild
+  // NOT force-resetting jr.sig/jr.struct/jr.cards here: this runs on EVERY 30s
+  // auto-refresh and every manual refresh-button tap, so forcing a full rebuild
+  // made a full-day/week timetable (200-1400 cards) redo its ENTIRE innerHTML on
+  // every single refresh — the actual cause of "refresh takes a long time / shows
+  // a blank board". renderJourneys already compares its own sig/structSig against
+  // the previous render and does the cheapest thing that's correct: no-op if
+  // nothing changed, patch just the affected cards if the same journeys with new
+  // data, full rebuild only if the journey SET itself changed.
   renderJourneys(currentJourneyData, null, doScroll);
   // Live "now" search: once, in the background, load the FULL day's timetable and
   // fold it in (user lands on "now", scrolls up for earlier / down for the rest).
@@ -1719,21 +1738,25 @@ function renderJourneys(data, _pastData, doScroll = false, showAll = false) {
     allJourneysMap.set(key, j);  // always overwrite → keeps the freshest copy of a true duplicate
   });
 
+  // Per-journey values memoised on the object — a full-week list is ~1400 journeys
+  // and these are recomputed across the dedup/sort/tracked/filter/sig/structSig
+  // passes on EVERY 30 s refresh, which froze the main thread. Planned times don't
+  // change, so the uid + sort key are cached for the object's life (synth timetable
+  // objects persist across refreshes; fresh /trip objects compute once per render).
+  const juid = j => {
+    if (j.__juid !== undefined) return j.__juid;
+    const dP = j.legs[0]?.origin?.departureTimePlanned || j.legs[0]?.stopSequence?.[0]?.departureTimePlanned;
+    const aP = j.legs[j.legs.length-1]?.destination?.arrivalTimePlanned || j.legs[j.legs.length-1]?.stopSequence?.at(-1)?.arrivalTimePlanned;
+    return (j.__juid = stableUid(dP, aP));
+  };
+  const _sortDep = j => j.__sdep !== undefined ? j.__sdep
+    : (j.__sdep = (d => d ? new Date(d).getTime() : 0)(estDep(j.legs?.[0])));
+
   // FIX #8: null guard in sort
-  const allJourneys = Array.from(allJourneysMap.values()).sort((a, b) => {
-    const depA = estDep(a.legs?.[0]);
-    const depB = estDep(b.legs?.[0]);
-    if (!depA || !depB) return 0;
-    return new Date(depA) - new Date(depB);
-  });
+  const allJourneys = Array.from(allJourneysMap.values()).sort((a, b) => _sortDep(a) - _sortDep(b));
 
   const now2 = new Date();
   const DEPART_GRACE_MS = 60 * 1000;
-  const juid = j => {
-    const dP = j.legs[0]?.origin?.departureTimePlanned || j.legs[0]?.stopSequence?.[0]?.departureTimePlanned;
-    const aP = j.legs[j.legs.length-1]?.destination?.arrivalTimePlanned || j.legs[j.legs.length-1]?.stopSequence?.at(-1)?.arrivalTimePlanned;
-    return stableUid(dP, aP);
-  };
 
   // Keep each tracked journey's latest data as a snapshot, so when TfNSW stops
   // returning it (it has departed and is no longer "upcoming"), we can still show
@@ -1774,12 +1797,9 @@ function renderJourneys(data, _pastData, doScroll = false, showAll = false) {
     }
   });
 
-  // Sort by departure time
-  visibleJrns.sort((a, b) => {
-    const da = estDep(a.legs[0]), db = estDep(b.legs[0]);
-    if (!da || !db) return 0;
-    return new Date(da) - new Date(db);
-  });
+  // Sort by departure time (allJourneys was already sorted, so this is nearly a
+  // no-op pass — cached comparator keeps it cheap on a 1000+ card list).
+  visibleJrns.sort((a, b) => _sortDep(a) - _sortDep(b));
 
   if (!visibleJrns.length) {
     const msg = activeMode ? t('err_no_mode') : t('err_no_journeys');
@@ -1870,11 +1890,7 @@ function renderJourneys(data, _pastData, doScroll = false, showAll = false) {
   // Structure signature = the exact set + order of cards (plus mode/fav/departAt
   // flags). If unchanged, we PATCH only the cards whose HTML differs instead of
   // rebuilding the whole list — unchanged cards keep their DOM (no reparse/reflow).
-  const structSig = visibleJrns.map(j => {
-    const l = j.legs || [];
-    return stableUid(l[0]?.origin?.departureTimePlanned || l[0]?.stopSequence?.[0]?.departureTimePlanned,
-                     l[l.length-1]?.destination?.arrivalTimePlanned || l[l.length-1]?.stopSequence?.at(-1)?.arrivalTimePlanned);
-  }).join(',') + `#${showAll ? 'A' : ''}${activeMode || ''}${saved ? 'F' : ''}${departAt ? 'D' : ''}`;
+  const structSig = visibleJrns.map(juid).join(',') + `#${showAll ? 'A' : ''}${activeMode || ''}${saved ? 'F' : ''}${departAt ? 'D' : ''}`;
   const canPatch = jr.struct === structSig && container && container.querySelector('.jcard');
 
   if (!canPatch) {
@@ -1911,7 +1927,11 @@ function renderJourneys(data, _pastData, doScroll = false, showAll = false) {
   // (Tracked snapshots were refreshed + persisted above as the feed was processed.)
   startUpdatedCounter();
   updateFab();
-  _syncStickyVars();   // header + refresh-bar heights drive the sticky offset
+  // See _stickyDirty comment above _syncStickyVars — a full card-list rebuild can
+  // change the refresh-bar's height (different count text etc.), so it always
+  // re-measures; a patch-only refresh only measures if something else (lang
+  // switch, first render) flagged the header/refresh-bar as possibly resized.
+  if (!canPatch || _stickyDirty) { _syncStickyVars(); _stickyDirty = false; }
 
   // Warm the live vehicle feed for the modes on screen so seat-availability and
   // LIVE badges can populate on the cards (otherwise the feed only loads when the
@@ -2029,7 +2049,13 @@ function buildJCard(uid, dep, arr, firstTL, lastTL, origPlat, destPlat, legs, ba
   const trackingPill = tracked ? `<span class="status-pill status-tracking">📍 ${t('tracking_badge')}</span>` : '';
 
   const platAlerts = platChangeBadges(uid, origPlat, destPlat);
-  const seat       = seatBadgeHtml(firstTransit || legs[0], dep);
+  // Live seat/occupancy comes from a vehicle-position match by route/trip, which
+  // ignores the date — so a scheduled TOMORROW card would otherwise borrow a
+  // currently-running vehicle's seats. Only show it for a service running now / very
+  // soon (a vehicle you could actually board).
+  const _seatSoon = transitDep && (new Date(transitDep) - nowCheck) < 75 * 60000
+                                && (new Date(transitDep) - nowCheck) > -45 * 60000;
+  const seat       = _seatSoon ? seatBadgeHtml(firstTransit || legs[0], dep) : '';
   const a11y       = journeyAccessible(legs)
     ? `<span class="a11y-badge" title="Step-free / wheelchair accessible">♿ ${t('accessible')}</span>` : '';
   // Real-time availability badge — only for the states that DEFY expectation.
