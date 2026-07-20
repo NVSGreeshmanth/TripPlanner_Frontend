@@ -1534,10 +1534,12 @@ function _schedCard(s, cls, depISO, arrISO) {
     legs: [{
       origin:      { name: state.from.name, departureTimePlanned: depISO, properties: s.depPlat ? { platform: s.depPlat } : undefined },
       destination: { name: state.to.name,   arrivalTimePlanned:   arrISO, properties: s.arrPlat ? { platform: s.arrPlat } : undefined },
-      // RealtimeTripId is where _vpTripId (→ /gtfstrip) looks, so tapping a
-      // scheduled card loads its full terminus-to-terminus stop list.
+      // tripCode is read by _vpTripId (→ /gtfstrip) so tapping a scheduled card
+      // still loads its full stop list — but NOT by legIsRealtime, so a synth
+      // timetable card is not mistaken for a live one (which showed a false
+      // "On time"). Scheduled cards have no realtime; they read "No live data".
       transportation: { product: { class: cls }, disassembledName: line, number: line,
-                        properties: { RealtimeTripId: s.tripId } },
+                        properties: { tripCode: s.tripId } },
     }],
     _sched: true, _tripId: s.tripId,
   };
