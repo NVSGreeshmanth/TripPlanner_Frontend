@@ -1460,7 +1460,7 @@ export async function fetchJourneys(doScroll = false) {
 // TfNSW product class → GTFS schedule mode (rail only — bus stops aren't named
 // "Platform N" so the /schedule lookup can't match them; those fall back to the
 // planner windows).
-const _SCHED_MODE = { 1: 'trains', 2: 'metro', 4: 'lightrail', 9: 'ferries' };
+const _SCHED_MODE = { 1: 'trains', 2: 'metro', 4: 'lightrail', 5: 'buses', 9: 'ferries' };
 
 // Full-day timetable from the GTFS /schedule endpoint. Synthesises a lean card per
 // scheduled service, but keeps the rich /trip cards (live delay, platforms, line)
@@ -1480,7 +1480,7 @@ async function loadFullSchedule(fresh) {
   const toN   = (state.to.name   || '').split(',')[0].trim();
   let res = null;
   try {
-    res = await timedFetch(PROXY + '/schedule?' + new URLSearchParams({ from: fromN, to: toN, date, mode }))
+    res = await timedFetch(PROXY + '/schedule?' + new URLSearchParams({ from: fromN, to: toN, from_id: state.from.id || '', to_id: state.to.id || '', date, mode }))
       .then(r => (r.ok ? r.json() : null));
   } catch { res = null; }
   if (!res || !res.supported || !(res.services || []).length) return loadEarlierFromMorning(fresh);
@@ -1534,7 +1534,10 @@ function _schedCard(s, cls, depISO, arrISO) {
     legs: [{
       origin:      { name: state.from.name, departureTimePlanned: depISO, properties: s.depPlat ? { platform: s.depPlat } : undefined },
       destination: { name: state.to.name,   arrivalTimePlanned:   arrISO, properties: s.arrPlat ? { platform: s.arrPlat } : undefined },
-      transportation: { product: { class: cls }, disassembledName: line, number: line },
+      // RealtimeTripId is where _vpTripId (→ /gtfstrip) looks, so tapping a
+      // scheduled card loads its full terminus-to-terminus stop list.
+      transportation: { product: { class: cls }, disassembledName: line, number: line,
+                        properties: { RealtimeTripId: s.tripId } },
     }],
     _sched: true, _tripId: s.tripId,
   };
@@ -1553,7 +1556,7 @@ async function appendNextSchedDay() {
     const mode  = schedState.mode, cls = schedState.cls;
     let res = null;
     try {
-      res = await timedFetch(PROXY + '/schedule?' + new URLSearchParams({ from: fromN, to: toN, date: _schedYmd(off), mode }))
+      res = await timedFetch(PROXY + '/schedule?' + new URLSearchParams({ from: fromN, to: toN, from_id: state.from.id || '', to_id: state.to.id || '', date: _schedYmd(off), mode }))
         .then(r => (r.ok ? r.json() : null));
     } catch { res = null; }
     const services = (res && res.supported && res.services) || [];
@@ -1834,7 +1837,10 @@ function renderJourneys(data, _pastData, doScroll = false, showAll = false) {
     const depP = legs[0]?.origin?.departureTimePlanned || legs[0]?.stopSequence?.[0]?.departureTimePlanned;
     const arrP = legs[legs.length-1]?.destination?.arrivalTimePlanned || legs[legs.length-1]?.stopSequence?.at(-1)?.arrivalTimePlanned;
     const uid  = stableUid(depP, arrP);
-    if (svState.stops.size >= 50 && !svState.stops.has(uid)) svState.stops.delete(svState.stops.keys().next().value);
+    // Cap is high enough to cover a full multi-day timetable — each entry is a few
+    // refs to legs already in memory, so every rendered card stays tappable. (At 50
+    // most cards in a 200+ day list evicted, so tapping them opened an empty view.)
+    if (svState.stops.size >= 2000 && !svState.stops.has(uid)) svState.stops.delete(svState.stops.keys().next().value);
     svState.stops.set(uid, { legs, origName: cleanStationName(firstTL?.origin?.name || ''), destName: cleanStationName(lastTL?.destination?.name || '') });
     const fareHtml = buildFareHtml(j.fare);
     return { uid, html: buildJCard(uid, dep, arr, firstTL, lastTL, origPlat, destPlat, legs, badges, xfers, animate, idx, fareHtml, { fn, tn }) };
