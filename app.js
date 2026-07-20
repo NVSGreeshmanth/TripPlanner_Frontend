@@ -1529,11 +1529,12 @@ function _schedYmd(off) {
 // arrPlat) ride in origin/destination.properties so buildJCard renders them just
 // like a /trip card; line badges still need route data in the GTFS DB.
 function _schedCard(s, cls, depISO, arrISO) {
+  const line = s.line || '';
   return {
     legs: [{
       origin:      { name: state.from.name, departureTimePlanned: depISO, properties: s.depPlat ? { platform: s.depPlat } : undefined },
       destination: { name: state.to.name,   arrivalTimePlanned:   arrISO, properties: s.arrPlat ? { platform: s.arrPlat } : undefined },
-      transportation: { product: { class: cls }, disassembledName: '' },
+      transportation: { product: { class: cls }, disassembledName: line, number: line },
     }],
     _sched: true, _tripId: s.tripId,
   };
