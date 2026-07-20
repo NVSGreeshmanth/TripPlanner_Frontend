@@ -46,7 +46,7 @@ function _installWindowBridge() {
     // Inline on*="" handlers (index.html + rendered HTML)
     _navTab, _svBack, _svToggleLeg, _svToggleAllStops, clearDataSheet, clearInput, closeFavRes, closeJourneyView,
     closeNearby, closeSheet, closeStopsView, doSearch, findNearby, goHome,
-    loadDepartures, loadEarlierJourneys, manualRefreshDepart, manualRefreshJourney, onDepartAtChange, onFocus,
+    loadDepartures, manualRefreshDepart, manualRefreshJourney, onDepartAtChange, onFocus,
     onInput, onKey, openJourneyFromFab, openJourneyView, openSheet, openStopsView,
     removeFav, retryWhenOnline, searchFav, setAccent, setAmPm, setDepMode,
     setDepartNow, setFont, setLang, setMode, setTheme, setTimeFmt,
@@ -1232,6 +1232,18 @@ function startUpdatedCounter() {
 
 // ── Journey Search ────────────────────────────────────────────────────────────
 let journeyTimer = null;
+// Every service since ~5am, auto-loaded once per search and prepended above the
+// upcoming list. Held separately so the 30s refresh (which re-fetches only the
+// upcoming set) can merge them back rather than wiping them.
+let earlierJourneys = [];
+// Stable per-journey id (planned dep+arr), reused for dedupe across fetches.
+function _juid(j) {
+  const l = j.legs || [];
+  const dP = l[0]?.origin?.departureTimePlanned || l[0]?.stopSequence?.[0]?.departureTimePlanned;
+  const aP = l[l.length-1]?.destination?.arrivalTimePlanned || l[l.length-1]?.stopSequence?.at(-1)?.arrivalTimePlanned;
+  return stableUid(dP, aP);
+}
+const _jrnDep = j => estDep((j.legs || []).find(l => !isWalkLeg(l)) || j.legs?.[0]);
 // Clean up interval on page unload to prevent stale polling after navigation
 window.addEventListener('beforeunload', () => clearInterval(journeyTimer));
 
@@ -1366,6 +1378,7 @@ export async function doSearch() {
       setFindBtn(false);
       return;
     }
+    earlierJourneys = [];   // fresh search → forget any prior morning services
     await fetchJourneys(true);
     if (!state.from.name) state.from.name = fn;
     if (!state.to.name)   state.to.name = tn;
@@ -1398,68 +1411,78 @@ export async function fetchJourneys(doScroll = false) {
   const res = await timedFetch(PROXY + '/trip?' + new URLSearchParams(p));
   if (!res.ok) return;
   serverReady = true;
-  currentJourneyData     = await res.json();
+  const data  = await res.json();
+  const fresh = data.journeys || [];
   currentPastJourneyData = null;
-  jr.showPast = false;     // a fresh search starts from "next services"
+  // Merge the already-loaded morning services back in — the 30s refresh only
+  // re-fetches the upcoming set, so without this it would wipe the earlier list.
+  if (earlierJourneys.length) {
+    const seen = new Set(fresh.map(_juid));
+    const kept = earlierJourneys.filter(j => !seen.has(_juid(j)));
+    currentJourneyData = { ...data, journeys: [...kept, ...fresh] };
+    jr.showPast = true;
+  } else {
+    currentJourneyData = data;
+    jr.showPast = false;
+  }
   jr.sig = ''; jr.struct = ''; jr.cards.clear();   // force full rebuild
   renderJourneys(currentJourneyData, null, doScroll);
+  // Live "now" search: once, in the background, pull in every earlier service
+  // since this morning and prepend them (user lands on "now", scrolls up for more).
+  if (doScroll && !departAt && !earlierJourneys.length) loadEarlierFromMorning(fresh);
 }
 
-// Pull in services that depart BEFORE the earliest one currently shown. Queries
-// with depArr=arr at the earliest departure time → TfNSW returns trips arriving by
-// then (i.e. earlier departures), which we dedupe and prepend.
-async function loadEarlierJourneys(btn) {
-  const js = currentJourneyData?.journeys || [];
-  if (!js.length || !state.from.id || !state.to.id) return;
-  if (btn) { btn.disabled = true; btn.classList.add('loading'); btn.innerHTML =
-    `<span class="spin spin-sm"></span> ${t('loading') || 'Loading…'}`; }
-
-  let earliest = null;
-  for (const j of js) {
-    const d = estDep((j.legs || []).find(l => !isWalkLeg(l)) || j.legs[0]);
-    if (d && (!earliest || new Date(d) < new Date(earliest))) earliest = d;
+// Auto-load all services from ~5am up to the first upcoming departure and prepend
+// them. Runs ONCE per search, in the background — the upcoming results already
+// rendered, so this never slows the first result. Windows every 2h are fetched in
+// parallel and deduped; the view is anchored to "now" so prepending doesn't jump.
+async function loadEarlierFromMorning(fresh) {
+  if (!state.from.id || !state.to.id || departAt) return;
+  let boundary = Infinity;
+  for (const j of fresh) {
+    const d = _jrnDep(j); const t = d ? new Date(d).getTime() : Infinity;
+    if (t < boundary) boundary = t;
   }
-  const base = new Date((earliest ? new Date(earliest) : new Date()).getTime() - 60000);
-  const sp = sydParts(base);
+  const sp = sydParts(new Date());
   const z2 = n => String(n).padStart(2, '0');
-  const p = {
-    from: state.from.id, to: state.to.id, depArr: 'arr', trips: '12',
-    itdDate: `${sp.year}${z2(sp.month)}${z2(sp.day)}`, itdTime: `${z2(sp.hour)}${z2(sp.minute)}`,
-  };
-  if (activeMode) p.excl = activeMode;
-
-  const _uid = j => {
-    const dP = j.legs[0]?.origin?.departureTimePlanned || j.legs[0]?.stopSequence?.[0]?.departureTimePlanned;
-    const aP = j.legs[j.legs.length-1]?.destination?.arrivalTimePlanned || j.legs[j.legs.length-1]?.stopSequence?.at(-1)?.arrivalTimePlanned;
-    return stableUid(dP, aP);
-  };
-  try {
-    const res = await timedFetch(PROXY + '/trip?' + new URLSearchParams(p));
-    if (res.ok) {
-      const d = await res.json();
-      const seen = new Set(js.map(_uid));
-      // Exclude walk-only journeys — "earlier services" means actual transit.
-      const earlierNew = (d.journeys || []).filter(j =>
-        (j.legs || []).some(l => !isWalkLeg(l)) && !seen.has(_uid(j)));
-      currentJourneyData = { ...currentJourneyData, journeys: [...earlierNew, ...js] };
-      jr.showPast = true;   // keep the earlier (now-past) services visible
-      // Anchor the previously-earliest service so the existing list doesn't appear
-      // to vanish — the new earlier services sit just above it (a scroll-up away).
-      let anchor = null, anchorT = Infinity;
-      for (const j of js) {
-        const d = estDep((j.legs || []).find(l => !isWalkLeg(l)) || j.legs[0]);
-        const tms = d ? new Date(d).getTime() : Infinity;
-        if (tms < anchorT) { anchorT = tms; anchor = j; }
-      }
-      const anchorUid = anchor ? _uid(anchor) : null;
-      renderJourneys(currentJourneyData, null, false);
-      if (anchorUid) requestAnimationFrame(() => {
-        const card = document.querySelector(`.jcard[data-juid="${anchorUid}"]`);
-        if (card) card.scrollIntoView({ block: 'start', behavior: 'auto' });
-      });
-    }
-  } catch { /* leave the list as-is */ }
+  const date = `${sp.year}${z2(sp.month)}${z2(sp.day)}`;
+  const windows = [];
+  for (let h = 5; h <= sp.hour; h += 2) windows.push(z2(h) + '00');
+  if (!windows.length) return;   // before ~5am there is nothing earlier today
+  const batches = await Promise.all(windows.map(time => {
+    const q = { from: state.from.id, to: state.to.id, itdDate: date, itdTime: time, trips: '20' };
+    if (activeMode) q.excl = activeMode;
+    return timedFetch(PROXY + '/trip?' + new URLSearchParams(q))
+      .then(r => r.ok ? r.json() : { journeys: [] }).catch(() => ({ journeys: [] }));
+  }));
+  const seen = new Set(fresh.map(_juid));
+  const earlier = [];
+  for (const b of batches) for (const j of (b.journeys || [])) {
+    if (!(j.legs || []).some(l => !isWalkLeg(l))) continue;   // real transit only
+    const d = _jrnDep(j);
+    if (!d || new Date(d).getTime() >= boundary) continue;    // strictly earlier
+    const u = _juid(j);
+    if (seen.has(u)) continue;
+    seen.add(u); earlier.push(j);
+  }
+  if (!earlier.length) return;
+  // A different search may have started while we awaited — bail if so.
+  if (!currentJourneyData || !state.from.id) return;
+  earlier.sort((a, b) => new Date(_jrnDep(a)) - new Date(_jrnDep(b)));
+  earlierJourneys = earlier;
+  // Anchor to the earliest UPCOMING service so the list doesn't jump when the
+  // morning services slot in above it.
+  let anchorUid = null, anchorT = Infinity;
+  for (const j of fresh) { const t = new Date(_jrnDep(j)).getTime(); if (t < anchorT) { anchorT = t; anchorUid = _juid(j); } }
+  currentJourneyData = { ...currentJourneyData, journeys: [...earlier, ...fresh] };
+  jr.showPast = true; jr.sig = ''; jr.struct = '';
+  renderJourneys(currentJourneyData, null, false);
+  if (anchorUid) requestAnimationFrame(() => {
+    const card = document.querySelector(`.jcard[data-juid="${anchorUid}"]`);
+    if (card) card.scrollIntoView({ block: 'start', behavior: 'auto' });
+  });
 }
+
 
 // Fetch all services for today across 5 time windows and show them all.
 // TfNSW returns ~12 trips per call; 5 calls × 15 trips = ~75 results covering the full day.
@@ -1628,12 +1651,8 @@ function renderJourneys(data, _pastData, doScroll = false, showAll = false) {
     </div>
   </div>`;
 
-  // "Earlier services" — fetch services that depart before the first one shown.
-  // Hidden in all-day view (everything is already loaded).
-  if (!showAll) {
-    html += `<button class="earlier-btn" onclick="loadEarlierJourneys(this)">
-      <span class="earlier-ic">↑</span> ${t('earlier_services') || 'Earlier services'}</button>`;
-  }
+  // (Earlier services are auto-loaded since ~5am and prepended — no button. The
+  // user lands on "now" and scrolls up through the morning.)
 
   // Build one card's args + HTML (also refreshes the stops-data map entry).
   const _buildOneCard = (j, idx, animate) => {
