@@ -1248,9 +1248,18 @@ addEventListener('resize', () => requestAnimationFrame(_syncStickyVars));
 // upcoming set) can merge them back rather than wiping them.
 let earlierJourneys = [];
 // Full-week timetable state. `available` flips true once a rail /schedule load
-// succeeds for the current search, which is what surfaces the day chips. `day` is
-// the offset from today (0=today live, 1..6 = future scheduled-only day).
-let schedState = { available: false, mode: null, day: 0 };
+// succeeds. The list is ONE continuous scroll: today loads first, then each
+// following day (up to +6) is appended as the user scrolls near the bottom, with a
+// day-divider header between days. `loadedDays` = how many days are in the list.
+let schedState = { available: false, mode: null, cls: 0, loadedDays: 1, loading: false };
+const _z2 = n => String(n).padStart(2, '0');
+// YYYY-MM-DD of an instant in Sydney — used to detect day boundaries in the list.
+const _sydDayKey = d => { if (!d) return ''; const p = sydParts(d instanceof Date ? d : new Date(d)); return `${p.year}-${_z2(p.month)}-${_z2(p.day)}`; };
+const _uiLang = () => document.documentElement.lang || 'en-AU';
+// Weekday label ("Tue") for an instant, in Sydney terms (UTC date-only so no shift).
+function _weekdayShort(d) { const p = sydParts(d instanceof Date ? d : new Date(d)); return new Date(Date.UTC(p.year, p.month - 1, p.day)).toLocaleDateString(_uiLang(), { weekday: 'short', timeZone: 'UTC' }); }
+// Full divider label ("Tuesday 21 Jul") for a day header.
+function _dayHeaderLabel(d) { const p = sydParts(d instanceof Date ? d : new Date(d)); return new Date(Date.UTC(p.year, p.month - 1, p.day)).toLocaleDateString(_uiLang(), { weekday: 'long', day: 'numeric', month: 'short', timeZone: 'UTC' }); }
 // Stable per-journey id (planned dep+arr), reused for dedupe across fetches.
 function _juid(j) {
   const l = j.legs || [];
@@ -1394,7 +1403,7 @@ export async function doSearch() {
       return;
     }
     earlierJourneys = [];   // fresh search → forget any prior morning services
-    schedState = { available: false, mode: null, day: 0 };   // and any prior day chips
+    schedState = { available: false, mode: null, cls: 0, loadedDays: 1, loading: false };
     await fetchJourneys(true);
     if (!state.from.name) state.from.name = fn;
     if (!state.to.name)   state.to.name = tn;
@@ -1421,9 +1430,6 @@ export async function doSearch() {
 }
 
 export async function fetchJourneys(doScroll = false) {
-  // Auto-refresh tick (doScroll=false) while a FUTURE day is selected would refetch
-  // "now" and wipe the day's timetable — skip it. A user action always passes true.
-  if (!doScroll && schedState.day > 0) return;
   const p = { from: state.from.id, to: state.to.id };
   if (activeMode) p.excl = activeMode;
   if (departAt) { p.itdDate = departAt.itdDate; p.itdTime = departAt.itdTime; }
@@ -1491,22 +1497,16 @@ async function loadFullSchedule(fresh) {
   for (const s of res.services) {
     const depISO = toISO(s.dep);
     if (freshMin.has(Math.floor(new Date(depISO).getTime() / 60000))) continue;  // rich card wins
-    synth.push({
-      legs: [{
-        origin:      { name: state.from.name, departureTimePlanned: depISO },
-        destination: { name: state.to.name,   arrivalTimePlanned:   toISO(s.arr) },
-        transportation: { product: { class: cls }, disassembledName: '' },
-      }],
-      _sched: true, _tripId: s.tripId,
-    });
+    synth.push(_schedCard(s, cls, depISO, toISO(s.arr)));
   }
-  schedState = { available: true, mode, day: 0 };         // rail schedule → show day chips
+  schedState = { available: true, mode, cls, loadedDays: 1, loading: false };
   if (!synth.length) return;
   earlierJourneys = synth;                                // 30s refresh keeps them
   const all = [...synth, ...fresh].sort((a, b) => new Date(_jrnDep(a)) - new Date(_jrnDep(b)));
   currentJourneyData = { ...currentJourneyData, journeys: all };
   jr.showPast = true; jr.sig = ''; jr.struct = '';
   renderJourneys(currentJourneyData, null, false);
+  _installSchedScroll();
   // Anchor to the earliest UPCOMING rich service so the list doesn't jump.
   let anchorUid = null, anchorT = Infinity;
   for (const j of fresh) { const t = new Date(_jrnDep(j)).getTime(); if (t < anchorT) { anchorT = t; anchorUid = _juid(j); } }
@@ -1516,80 +1516,78 @@ async function loadFullSchedule(fresh) {
   });
 }
 
-// Target Sydney calendar date + label for a day offset. All arithmetic on a
-// date-only UTC value so a DST transition inside the week can't shift the date.
-function _schedDateStr(off) {
+// Target Sydney calendar date (YYYYMMDD) for a day offset. Date-only UTC
+// arithmetic so a DST transition inside the week can't shift the date.
+function _schedYmd(off) {
   const sp = sydParts(new Date());
   const d = new Date(Date.UTC(sp.year, sp.month - 1, sp.day));
   d.setUTCDate(d.getUTCDate() + off);
-  const z = n => String(n).padStart(2, '0');
-  const ymd = `${d.getUTCFullYear()}${z(d.getUTCMonth() + 1)}${z(d.getUTCDate())}`;
-  const label = off === 0 ? (t('sched_today') || 'Today')
-    : off === 1 ? (t('sched_tomorrow') || 'Tomorrow')
-      : d.toLocaleDateString(document.documentElement.lang || 'en-AU', { weekday: 'short', timeZone: 'UTC' });
-  return { ymd, label };
+  return `${d.getUTCFullYear()}${_z2(d.getUTCMonth() + 1)}${_z2(d.getUTCDate())}`;
 }
 
-// Seven day chips (Today … +6). Only rendered once a rail /schedule load has
-// succeeded; the active chip reflects schedState.day.
-function _schedChipsHtml() {
-  if (!schedState.available || departAt) return '';
-  let chips = '';
-  for (let off = 0; off < 7; off++) {
-    const { label } = _schedDateStr(off);
-    chips += `<button class="sched-chip${off === schedState.day ? ' is-active' : ''}" onclick="selectSchedDay(${off})">${label}</button>`;
-  }
-  return `<div class="sched-days" role="tablist">${chips}</div>`;
-}
-
-// Tap a day chip: day 0 restores the live "now" view; any other day loads that
-// date's full timetable (scheduled-only — no live data exists for a future day).
-async function loadScheduleForDay(off) {
-  if (off === schedState.day && off !== 0) return;
-  if (off === 0) {                       // back to today's live view
-    schedState.day = 0; earlierJourneys = [];
-    return fetchJourneys(true);
-  }
-  if (!schedState.available || !state.from.id || !state.to.id) return;
-  schedState.day = off;
-  const { ymd } = _schedDateStr(off);
-  const mode  = schedState.mode;
-  const fromN = (state.from.name || '').split(',')[0].trim();
-  const toN   = (state.to.name   || '').split(',')[0].trim();
-  const cls   = +(Object.keys(_SCHED_MODE).find(k => _SCHED_MODE[k] === mode) || 0);
-  let res = null;
-  try {
-    res = await timedFetch(PROXY + '/schedule?' + new URLSearchParams({ from: fromN, to: toN, date: ymd, mode }))
-      .then(r => (r.ok ? r.json() : null));
-  } catch { res = null; }
-  if (schedState.day !== off) return;    // a newer chip was tapped mid-fetch
-  const services = (res && res.supported && res.services) || [];
-  if (!services.length) {
-    currentJourneyData = { ...currentJourneyData, journeys: [] };
-    earlierJourneys = []; jr.sig = ''; jr.struct = ''; jr.cards.clear();
-    renderJourneys(currentJourneyData, null, false, true);
-    return;
-  }
-  // Seconds-of-day → absolute instant, anchored to that day's Sydney midnight.
-  const sp = sydParts(new Date());
-  const nowSec = sp.hour * 3600 + sp.minute * 60;
-  const base = (Date.now() - nowSec * 1000) + off * 86400 * 1000;
-  const toISO = sec => new Date(base + sec * 1000).toISOString();
-  const synth = services.map(s => ({
+// One synthesised timetable card from a /schedule service. Platforms (depPlat/
+// arrPlat) ride in origin/destination.properties so buildJCard renders them just
+// like a /trip card; line badges still need route data in the GTFS DB.
+function _schedCard(s, cls, depISO, arrISO) {
+  return {
     legs: [{
-      origin:      { name: state.from.name, departureTimePlanned: toISO(s.dep) },
-      destination: { name: state.to.name,   arrivalTimePlanned:   toISO(s.arr) },
+      origin:      { name: state.from.name, departureTimePlanned: depISO, properties: s.depPlat ? { platform: s.depPlat } : undefined },
+      destination: { name: state.to.name,   arrivalTimePlanned:   arrISO, properties: s.arrPlat ? { platform: s.arrPlat } : undefined },
       transportation: { product: { class: cls }, disassembledName: '' },
     }],
     _sched: true, _tripId: s.tripId,
-  }));
-  earlierJourneys = synth;
-  currentJourneyData = { ...currentJourneyData, journeys: synth };
-  jr.showPast = true; jr.sig = ''; jr.struct = ''; jr.cards.clear();
-  renderJourneys(currentJourneyData, null, false, true);   // showAll: no "past" filtering
-  requestAnimationFrame(() => byId('journey-results')?.scrollIntoView?.({ block: 'start' }));
+  };
 }
-globalThis.selectSchedDay = off => loadScheduleForDay(off);
+
+// Append the next day's full timetable to the continuous list. Fires from the
+// scroll handler as the user nears the bottom, once per day, up to +6 days out.
+async function appendNextSchedDay() {
+  if (!schedState.available || schedState.loading || schedState.loadedDays > 6) return;
+  if (!state.from.id || !state.to.id || departAt) return;
+  const off = schedState.loadedDays;                     // 1..6
+  schedState.loading = true;
+  try {
+    const fromN = (state.from.name || '').split(',')[0].trim();
+    const toN   = (state.to.name   || '').split(',')[0].trim();
+    const mode  = schedState.mode, cls = schedState.cls;
+    let res = null;
+    try {
+      res = await timedFetch(PROXY + '/schedule?' + new URLSearchParams({ from: fromN, to: toN, date: _schedYmd(off), mode }))
+        .then(r => (r.ok ? r.json() : null));
+    } catch { res = null; }
+    const services = (res && res.supported && res.services) || [];
+    schedState.loadedDays = off + 1;                     // consumed this day even if empty
+    if (!services.length || !currentJourneyData) return;
+    // Seconds-of-day → absolute instant at that day's Sydney midnight.
+    const sp = sydParts(new Date());
+    const nowSec = sp.hour * 3600 + sp.minute * 60;
+    const base = (Date.now() - nowSec * 1000) + off * 86400 * 1000;
+    const toISO = sec => new Date(base + sec * 1000).toISOString();
+    const add = services.map(s => _schedCard(s, cls, toISO(s.dep), toISO(s.arr)));
+    earlierJourneys = [...earlierJourneys, ...add];      // kept across the 30s refresh
+    const all = [...(currentJourneyData.journeys || []), ...add]
+      .sort((a, b) => new Date(_jrnDep(a)) - new Date(_jrnDep(b)));
+    currentJourneyData = { ...currentJourneyData, journeys: all };
+    jr.showPast = true; jr.sig = ''; jr.struct = '';
+    renderJourneys(currentJourneyData, null, false, true);   // showAll: keep future days
+  } finally {
+    schedState.loading = false;
+  }
+}
+
+// Attach a single passive scroll handler (once) that appends the next day when the
+// user scrolls within ~1200px of the bottom of the results.
+let _schedScrollBound = false;
+function _installSchedScroll() {
+  if (_schedScrollBound) return;
+  _schedScrollBound = true;
+  addEventListener('scroll', () => {
+    if (!schedState.available || schedState.loading || schedState.loadedDays > 6) return;
+    if (byId('page-journey')?.offsetParent == null) return;   // only while the results are visible
+    const nearBottom = (window.innerHeight + window.scrollY) >= (document.body.offsetHeight - 1200);
+    if (nearBottom) appendNextSchedDay();
+  }, { passive: true });
+}
 
 // Auto-load all services from ~5am up to the first upcoming departure and prepend
 // them. Runs ONCE per search, in the background — the upcoming results already
@@ -1808,7 +1806,6 @@ function renderJourneys(data, _pastData, doScroll = false, showAll = false) {
         ${!departAt && !showAll ? `<div class="auto-badge"><span class="ldot"></span></div>` : ''}
       </div>
     </div>
-    ${_schedChipsHtml()}
   </div>`;
 
   // (Earlier services are auto-loaded since ~5am and prepended — no button. The
@@ -1855,7 +1852,18 @@ function renderJourneys(data, _pastData, doScroll = false, showAll = false) {
 
   if (!canPatch) {
     jr.cards.clear();
-    visibleJrns.forEach((j, idx) => { const c = _buildOneCard(j, idx, true); jr.cards.set(c.uid, c.html); html += c.html; });
+    // Day-divider header whenever the Sydney date changes between consecutive cards
+    // — only fires in a multi-day (timetable) list; single-day results never show one.
+    let _lastDay = '';
+    visibleJrns.forEach((j, idx) => {
+      const c = _buildOneCard(j, idx, true);
+      const dk = _sydDayKey(_jrnDep(j));
+      if (dk && dk !== _lastDay) {
+        if (_lastDay) html += `<div class="day-divider">${_dayHeaderLabel(_jrnDep(j))}</div>`;
+        _lastDay = dk;
+      }
+      jr.cards.set(c.uid, c.html); html += c.html;
+    });
     container.innerHTML = html;
   } else {
     // Same journeys → swap only the cards that actually changed (delay/live/etc.).
@@ -2022,13 +2030,18 @@ function buildJCard(uid, dep, arr, firstTL, lastTL, origPlat, destPlat, legs, ba
   if (_journeyDone)        { cdMain = t('rt_done') || 'Done'; }
   else if (hasDeparted)    { cdMain = t('departed') || 'Departed'; }
   else if (transitDep) {
-    const mins = Math.round((new Date(transitDep) - nowCheck) / 60000);
-    if (mins <= 0)        { cdMain = t('cd_now') || 'Now'; }
-    else if (mins < 60)   { cdMain = String(mins); cdSub = mins === 1 ? (t('cd_min') || 'min') : (t('cd_mins') || 'mins'); }
-    else {                 // >1h out: time LEFT, not the clock time (which the row already shows)
-      const h = Math.floor(mins / 60), m = mins % 60;
-      cdMain = m ? `${h}h ${m}` : `${h}h`;
-      cdSub  = m ? (t('cd_min') || 'min') : (t('cd_hr') || 'hr');
+    // A service on a LATER Sydney day shows the weekday ("Tue"), not a huge hour
+    // count ("17h 53 min") — the day divider + clock time carry the rest.
+    if (_sydDayKey(transitDep) !== _sydDayKey(nowCheck)) { cdMain = _weekdayShort(transitDep); }
+    else {
+      const mins = Math.round((new Date(transitDep) - nowCheck) / 60000);
+      if (mins <= 0)        { cdMain = t('cd_now') || 'Now'; }
+      else if (mins < 60)   { cdMain = String(mins); cdSub = mins === 1 ? (t('cd_min') || 'min') : (t('cd_mins') || 'mins'); }
+      else {                 // >1h out (same day): time LEFT, not the clock time
+        const h = Math.floor(mins / 60), m = mins % 60;
+        cdMain = m ? `${h}h ${m}` : `${h}h`;
+        cdSub  = m ? (t('cd_min') || 'min') : (t('cd_hr') || 'hr');
+      }
     }
   }
   const cdBlock = cdMain

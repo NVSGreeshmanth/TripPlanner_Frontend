@@ -234,14 +234,10 @@ header { background: linear-gradient(135deg, rgba(79,70,229,0.92) 0%, rgba(67,56
 /* Anchored 'now' card must clear the sticky header + refresh-bar. */
 .jcard { scroll-margin-top: calc(var(--hdr-h, 90px) + var(--rbar-h, 72px) + 10px); }
 .refresh-bar-row { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; margin-top: 7px; flex-wrap: wrap; }
-/* Day chips — horizontal scroller so 7 days never wrap the sticky bar taller. */
-.sched-days { display: flex; gap: 6px; margin-top: 10px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; padding-bottom: 1px; }
-.sched-days::-webkit-scrollbar { display: none; }
-.sched-chip { flex: 0 0 auto; padding: 6px 13px; border-radius: 999px; border: 1px solid rgba(26,33,55,0.12);
-  background: var(--card); color: var(--muted); font-size: 12.5px; font-weight: 700; cursor: pointer; white-space: nowrap;
-  transition: background .12s, color .12s, border-color .12s; }
-.sched-chip:hover { border-color: var(--blue); color: var(--text); }
-.sched-chip.is-active { background: var(--blue); color: #fff; border-color: var(--blue); }
+/* Day-divider header in the continuous timetable list (— Tuesday 21 Jul —). */
+.day-divider { display: flex; align-items: center; gap: 10px; margin: 18px 2px 10px;
+  font-size: 12.5px; font-weight: 800; letter-spacing: .02em; color: var(--muted); text-transform: uppercase; }
+.day-divider::before, .day-divider::after { content: ""; height: 1px; background: rgba(26,33,55,0.12); flex: 1; }
 .refresh-bar-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; margin-left: auto; }
 .rtitle-arrow { color: var(--muted); font-weight: 600; margin: 0 2px; }
 .rtitle { font-size: 14px; font-weight: 700; color: var(--text); line-height: 1.35; word-break: break-word; }
