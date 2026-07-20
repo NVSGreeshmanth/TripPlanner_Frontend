@@ -77,6 +77,7 @@ export const TM = {
     changes_badge:'{n} change', changes_badge_pl:'{n} changes',
     // live indicator
     updated_now:'Updated just now', updated_secs:'Updated {n}s ago', updated_mins:'Updated {n}m ago',
+    sched_today:'Today', sched_tomorrow:'Tomorrow', cd_hr:'hr',
     // vehicle position
     en_route_next:'{icon} En route · next stop {stop}',
     approaching:'{icon} Approaching {stop}',
@@ -167,6 +168,7 @@ export const TM = {
     changes_badge:'환승 {n}회', changes_badge_pl:'환승 {n}회',
     // live indicator
     updated_now:'방금 업데이트됨', updated_secs:'{n}초 전 업데이트', updated_mins:'{n}분 전 업데이트',
+    sched_today:'오늘', sched_tomorrow:'내일', cd_hr:'시간',
     // vehicle position
     en_route_next:'{icon} 운행 중 · 다음 정거장: {stop}',
     approaching:'{icon} {stop} 도착 예정',
