@@ -401,10 +401,23 @@ export async function _fetchOneLegFullStops(leg) {
   // nswtrains so Blue Mountains / Central Coast / South Coast / regional trains
   // also get the full before-boarding stop list.
   const gmodes = mot === 1 ? ['trains', 'nswtrains'] : (MOT_TO_GTFS_MODE[mot] ? [MOT_TO_GTFS_MODE[mot]] : []);
+  // A tripId found via the direct-service search can be a CHAINED through-running
+  // match (its advertised dep/arr come from a later point in the physical
+  // vehicle's day, not this trip_id's own raw first segment) — pass the rider's
+  // actual boarding/alighting station so the proxy can bound the chain to just
+  // this ride, instead of either the whole day's chain or the wrong segment.
+  const fromName = leg.origin?.name || '';
+  const toName   = leg.destination?.name || '';
+  const fromId   = leg.origin?.properties?.stopId || leg.stopSequence?.[0]?.properties?.stopId || '';
+  const toId     = leg.destination?.properties?.stopId || leg.stopSequence?.at(-1)?.properties?.stopId || '';
   if (tripId && gmodes.length) {
     for (const gmode of gmodes) {
       try {
         const p = new URLSearchParams({ trip_id: tripId, mode: gmode });
+        if (fromName) p.set('from', fromName);
+        if (toName)   p.set('to', toName);
+        if (fromId)   p.set('from_id', fromId);
+        if (toId)     p.set('to_id', toId);
         const r = await timedFetch(PROXY + '/gtfstrip?' + p, 75000);
         if (r.ok) {
           const json = await r.json();
