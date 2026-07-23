@@ -1547,13 +1547,14 @@ async function loadFullSchedule(fresh) {
     if (freshMin.has(Math.floor(new Date(depISO).getTime() / 60000))) continue;  // rich card wins
     synth.push(_schedCard(s, cls, depISO, toISO(s.arr)));
   }
-  // 1-change options ride alongside direct services (not gap-fill-only) — same
-  // full-evening listing style as TripView, which shows both for the same window.
-  for (const t of (res.transfers || [])) {
-    const depMin = Math.floor(new Date(toISO(t.dep)).getTime() / 60000);
-    if (freshMin.has(depMin)) continue;   // rich card wins
-    synth.push(_schedTransferCard(t, cls, toISO));
-  }
+  // 1-change transfer cards: PAUSED for now (plain direct timetable only, per
+  // request) — backend still computes res.transfers fine, just not rendered.
+  // Re-enable by uncommenting this loop when the feature is wanted again.
+  // for (const t of (res.transfers || [])) {
+  //   const depMin = Math.floor(new Date(toISO(t.dep)).getTime() / 60000);
+  //   if (freshMin.has(depMin)) continue;   // rich card wins
+  //   synth.push(_schedTransferCard(t, cls, toISO));
+  // }
   schedState = { available: true, mode, cls, loadedDays: 1, loading: false };
   if (!synth.length) return;
   earlierJourneys = synth;                                // 30s refresh keeps them
@@ -1642,18 +1643,16 @@ async function appendNextSchedDay() {
         .then(r => (r.ok ? r.json() : null));
     } catch { res = null; }
     const services = (res && res.supported && res.services) || [];
-    const transfers = (res && res.supported && res.transfers) || [];
     schedState.loadedDays = off + 1;                     // consumed this day even if empty
-    if ((!services.length && !transfers.length) || !currentJourneyData) return;
+    if (!services.length || !currentJourneyData) return;
     // Seconds-of-day → absolute instant at that day's Sydney midnight.
     const sp = sydParts(new Date());
     const nowSec = sp.hour * 3600 + sp.minute * 60;
     const base = (Date.now() - nowSec * 1000) + off * 86400 * 1000;
     const toISO = sec => new Date(base + sec * 1000).toISOString();
-    const add = [
-      ...services.map(s => _schedCard(s, cls, toISO(s.dep), toISO(s.arr))),
-      ...transfers.map(t => _schedTransferCard(t, cls, toISO)),
-    ];
+    // 1-change transfer cards: PAUSED for now (plain direct timetable only, per
+    // request) — backend still computes res.transfers fine, just not rendered.
+    const add = services.map(s => _schedCard(s, cls, toISO(s.dep), toISO(s.arr)));
     earlierJourneys = [...earlierJourneys, ...add];      // kept across the 30s refresh
     const all = [...(currentJourneyData.journeys || []), ...add]
       .sort((a, b) => new Date(_jrnDep(a)) - new Date(_jrnDep(b)));
