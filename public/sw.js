@@ -2,7 +2,7 @@
 // Hosted on: https://nswtripplanner.netlify.app/
 // API proxy: https://tripplannerau.duckdns.org (OCI A1); Render is the fallback
 
-const CACHE = 'nsw-journey-v162';
+const CACHE = 'nsw-journey-v163';
 
 // App shell — everything needed to show the UI instantly
 const SHELL = [

@@ -692,6 +692,17 @@ export function estArr(leg) {
 // position match alone wrongly marked them "SCHED". This flag fixes that.
 export function legIsRealtime(leg) {
   if (!leg) return false;
+  // TfNSW's planner API stamps RealtimeTripId + departureTimeEstimated on every
+  // SCHEDULED leg, not just tracked ones — a bus 8 hours out carries the same
+  // RealtimeTripId and an estimated time identical to its planned one as a bus
+  // leaving in 2 minutes. GTFS-RT can't have live data that far out, so only
+  // trust these fields when the leg is close enough to now for live tracking to
+  // plausibly exist (same window used for the seat/occupancy match).
+  const d = estDep(leg);
+  if (d) {
+    const deltaMin = (new Date(d) - Date.now()) / 60000;
+    if (deltaMin < -45 || deltaMin > 75) return false;
+  }
   const p = leg.transportation?.properties || {};
   if (p.RealtimeTripId || p.realtimeTripId) return true;
   if (leg.origin?.departureTimeEstimated || leg.destination?.arrivalTimeEstimated) return true;
@@ -1520,7 +1531,7 @@ async function loadFullSchedule(fresh) {
     res = await timedFetch(PROXY + '/schedule?' + new URLSearchParams({ from: fromN, to: toN, from_id: state.from.id || '', to_id: state.to.id || '', date, mode }))
       .then(r => (r.ok ? r.json() : null));
   } catch { res = null; }
-  if (!res || !res.supported || !(res.services || []).length) return loadEarlierFromMorning(fresh);
+  if (!res || !res.supported || (!(res.services || []).length && !(res.transfers || []).length)) return loadEarlierFromMorning(fresh);
   if (!currentJourneyData || !state.from.id) return;      // a newer search started
 
   // seconds-of-Sydney-day → absolute instant, offset-free: both are Sydney wall
@@ -1535,6 +1546,13 @@ async function loadFullSchedule(fresh) {
     const depISO = toISO(s.dep);
     if (freshMin.has(Math.floor(new Date(depISO).getTime() / 60000))) continue;  // rich card wins
     synth.push(_schedCard(s, cls, depISO, toISO(s.arr)));
+  }
+  // 1-change options ride alongside direct services (not gap-fill-only) — same
+  // full-evening listing style as TripView, which shows both for the same window.
+  for (const t of (res.transfers || [])) {
+    const depMin = Math.floor(new Date(toISO(t.dep)).getTime() / 60000);
+    if (freshMin.has(depMin)) continue;   // rich card wins
+    synth.push(_schedTransferCard(t, cls, toISO));
   }
   schedState = { available: true, mode, cls, loadedDays: 1, loading: false };
   if (!synth.length) return;
@@ -1582,6 +1600,31 @@ function _schedCard(s, cls, depISO, arrISO) {
   };
 }
 
+// Synthesised 1-change timetable card from a /schedule `transfers[]` entry — same
+// shape as a real multi-leg /trip journey (legs[0..1] with origin/destination/
+// transportation), so buildJCard/buildLegs render the transfer badge and the
+// "🔄 Transfer: <station>" row with no further changes on the render side.
+function _schedTransferCard(t, cls, toISO) {
+  const [l1, l2] = t.legs;
+  return {
+    legs: [
+      {
+        origin:      { name: state.from.name, departureTimePlanned: toISO(l1.dep) },
+        destination: { name: l1.toStopName || '', arrivalTimePlanned: toISO(l1.arr) },
+        transportation: { product: { class: cls }, disassembledName: l1.line || '', number: l1.line || '',
+                          properties: { tripCode: l1.tripId } },
+      },
+      {
+        origin:      { name: l2.fromStopName || '', departureTimePlanned: toISO(l2.dep) },
+        destination: { name: state.to.name,   arrivalTimePlanned: toISO(l2.arr) },
+        transportation: { product: { class: cls }, disassembledName: l2.line || '', number: l2.line || '',
+                          properties: { tripCode: l2.tripId } },
+      },
+    ],
+    _sched: true, _tripId: l1.tripId,
+  };
+}
+
 // Append the next day's full timetable to the continuous list. Fires from the
 // scroll handler as the user nears the bottom, once per day, up to +6 days out.
 async function appendNextSchedDay() {
@@ -1599,14 +1642,18 @@ async function appendNextSchedDay() {
         .then(r => (r.ok ? r.json() : null));
     } catch { res = null; }
     const services = (res && res.supported && res.services) || [];
+    const transfers = (res && res.supported && res.transfers) || [];
     schedState.loadedDays = off + 1;                     // consumed this day even if empty
-    if (!services.length || !currentJourneyData) return;
+    if ((!services.length && !transfers.length) || !currentJourneyData) return;
     // Seconds-of-day → absolute instant at that day's Sydney midnight.
     const sp = sydParts(new Date());
     const nowSec = sp.hour * 3600 + sp.minute * 60;
     const base = (Date.now() - nowSec * 1000) + off * 86400 * 1000;
     const toISO = sec => new Date(base + sec * 1000).toISOString();
-    const add = services.map(s => _schedCard(s, cls, toISO(s.dep), toISO(s.arr)));
+    const add = [
+      ...services.map(s => _schedCard(s, cls, toISO(s.dep), toISO(s.arr))),
+      ...transfers.map(t => _schedTransferCard(t, cls, toISO)),
+    ];
     earlierJourneys = [...earlierJourneys, ...add];      // kept across the 30s refresh
     const all = [...(currentJourneyData.journeys || []), ...add]
       .sort((a, b) => new Date(_jrnDep(a)) - new Date(_jrnDep(b)));
@@ -2042,7 +2089,10 @@ function buildJCard(uid, dep, arr, firstTL, lastTL, origPlat, destPlat, legs, ba
 
   const nowCheck     = new Date();
   const firstTransit = legs.find(l => !isWalkLeg(l));
-  const transitDep   = firstTransit ? estDep(firstTransit) : null;
+  // A walk-only journey (no transit leg at all — a suggested walking route) still
+  // has a departure time on its walk leg; without this fallback the countdown hero
+  // rendered completely blank for that option, which read as "next service missing".
+  const transitDep   = estDep(firstTransit || legs[0]);
   const hasDeparted  = transitDep ? new Date(transitDep) <= nowCheck : false;
   let departedPill = hasDeparted ? `<span class="status-pill status-departed">${t('departed')}</span>` : '';
   const tracked      = isTracked(uid);
@@ -2059,16 +2109,19 @@ function buildJCard(uid, dep, arr, firstTL, lastTL, origPlat, destPlat, legs, ba
   const a11y       = journeyAccessible(legs)
     ? `<span class="a11y-badge" title="Step-free / wheelchair accessible">♿ ${t('accessible')}</span>` : '';
   // Real-time availability badge — only for the states that DEFY expectation.
-  //  • Completed (already arrived) → "✓ Completed" — realtime has expired, so
-  //    only planned times remain.
+  //  • Completed (already arrived) → "✓ 4 min ago" — how long since it got in,
+  //    not a flat "Completed" that doesn't say whether that was 1 min or 1 hour ago.
   //  • No realtime → "○ No live data" (times are scheduled, trust them less).
   //  • Live → nothing. Live is what a rider already assumes; badging it on every
   //    card spent ink to say "normal".
   const _transitLegs = legs.filter(l => !isWalkLeg(l));
   const _journeyDone = arr && new Date(arr) <= nowCheck;
+  const _arrAgoMin = _journeyDone ? Math.round((nowCheck - new Date(arr)) / 60000) : 0;
+  const _arrAgoLabel = _arrAgoMin <= 0 ? (t('cd_now') || 'now')
+    : `${_arrAgoMin} ${_arrAgoMin === 1 ? (t('cd_min') || 'min') : (t('cd_mins') || 'mins')} ${t('cd_ago') || 'ago'}`;
   const rtBadge = !_transitLegs.length ? ''
     : _journeyDone
-      ? `<span class="rt-badge rt-done" title="${t('rt_done_tip') || 'This service has completed'}">✓ ${t('rt_done') || 'Completed'}</span>`
+      ? `<span class="rt-badge rt-done" title="${t('rt_done_tip') || 'This service has completed'}">✓ ${_arrAgoLabel}</span>`
       // `seat` means a live vehicle-position match (occupancy) exists — that IS
       // live data, so don't contradict it with "No live data" just because there's
       // no TripUpdates delay yet.
@@ -2089,7 +2142,11 @@ function buildJCard(uid, dep, arr, firstTL, lastTL, origPlat, destPlat, legs, ba
   const _cdNm = _cdLine?.transportation?.disassembledName || _cdLine?.transportation?.number || '';
   const _cdCol = getLineColors(_cdMot, _cdNm);
   let cdMain = '', cdSub = '';
-  if (_journeyDone)        { cdMain = t('rt_done') || 'Done'; }
+  if (_journeyDone) {
+    // Arrived — how long ago, same as the departed state below, not a flat "Done".
+    if (_arrAgoMin <= 0) { cdMain = t('cd_now') || 'Now'; }
+    else { cdMain = String(_arrAgoMin); cdSub = `${_arrAgoMin === 1 ? (t('cd_min') || 'min') : (t('cd_mins') || 'mins')} ${t('cd_ago') || 'ago'}`; }
+  }
   else if (hasDeparted) {
     // How long ago it left, not just "Departed" — "2 min ago" tells you if you
     // just missed it or it's long gone.
